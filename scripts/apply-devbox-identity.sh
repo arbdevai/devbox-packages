@@ -72,6 +72,32 @@ with open(props_path, "w", encoding="utf-8") as f:
 print("[*] Successfully updated properties.sh")
 PY
 
+# Safe-guard build-bootstraps.sh against empty/unset variable deletion in container
+BOOTSTRAPS_SCRIPT="${TARGET_DIR}/scripts/build-bootstraps.sh"
+if [[ -f "${BOOTSTRAPS_SCRIPT}" ]]; then
+    python3 - "${BOOTSTRAPS_SCRIPT}" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    text = f.read()
+
+# Replace unconditional variable expansion rm -f with safe non-empty directory checks
+text = text.replace(
+    'rm -f "$TERMUX_BUILT_PACKAGES_DIRECTORY_FOR_ARCH"/*',
+    'if [[ -n "${TERMUX_BUILT_PACKAGES_DIRECTORY_FOR_ARCH:-}" && -d "${TERMUX_BUILT_PACKAGES_DIRECTORY_FOR_ARCH}" ]]; then rm -f "${TERMUX_BUILT_PACKAGES_DIRECTORY_FOR_ARCH}"/*; fi'
+)
+text = text.replace(
+    'rm -f "$TERMUX_BUILT_DEBS_DIRECTORY"/*',
+    'if [[ -n "${TERMUX_BUILT_DEBS_DIRECTORY:-}" && -d "${TERMUX_BUILT_DEBS_DIRECTORY}" ]]; then rm -f "${TERMUX_BUILT_DEBS_DIRECTORY}"/*; fi'
+)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(text)
+
+print("[*] Successfully safeguarded scripts/build-bootstraps.sh cleanup logic")
+PY
+fi
+
 # Validate updated properties.sh by executing in subshell
 echo "[*] Validating updated properties.sh derivation rules..."
 (

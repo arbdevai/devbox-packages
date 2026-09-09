@@ -3,10 +3,6 @@ name: Build DevBox Bootstrap Archives (ARM64)
 on:
   workflow_dispatch:
     inputs:
-      force_rebuild:
-        description: "Force rebuild of all packages and dependencies"
-        type: boolean
-        default: true
       publish_release:
         description: "Publish bootstrap zip to GitHub Release"
         type: boolean
@@ -85,11 +81,14 @@ jobs:
           TARGET_DIR="${{ steps.setup_tree.outputs.repo_dir }}"
           cd "${TARGET_DIR}"
 
-          # Ensure container runs with explicit non-download configuration
-          # By NOT setting -i or -I, build-package compiles all dependencies from source
-          # targeting /data/data/com.devbox.terminal/files/usr.
+          # Ensure container runs with explicit non-download configuration.
+          # Do not pass -f on a fresh source tree: pinned build-bootstraps.sh
+          # initializes its package marker paths only during normal setup, while
+          # -f clears an empty/unset path as /* in the builder container.
+          # Omitting -i/-I still forces recursive source builds rather than
+          # downloading official com.termux Debian packages.
           echo "[*] Launching container build for ARM64..."
-          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures aarch64 -f
+          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures aarch64
 
       - name: Verify bootstrap archive prefix and integrity
         id: verify
