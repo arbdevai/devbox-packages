@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# apply-devbox-identity.sh
+# Configures termux-packages tree with DevBox (com.devbox.terminal) identity
+# and validates derived path properties.
+# ==============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/../config.env"
+
+if [[ -f "${CONFIG_FILE}" ]]; then
+    # shellcheck source=/dev/null
+    source "${CONFIG_FILE}"
+else
+    DEVBOX_APP_NAME="DevBox"
+    DEVBOX_APP_PACKAGE="com.devbox.terminal"
+    DEVBOX_APP_NAMESPACE="com.devbox.terminal"
+    DEVBOX_PREFIX="/data/data/com.devbox.terminal/files/usr"
+fi
+
+TARGET_DIR="${1:-.}"
+TARGET_DIR="$(realpath "${TARGET_DIR}")"
+PROPERTIES_FILE="${TARGET_DIR}/scripts/properties.sh"
+
+echo "[*] Applying DevBox identity to: ${TARGET_DIR}"
+
+if [[ ! -f "${PROPERTIES_FILE}" ]]; then
+    echo "[-] ERROR: properties.sh not found at ${PROPERTIES_FILE}" >&2
+    exit 1
+fi
+
+# Create backup of original properties.sh
+if [[ ! -f "${PROPERTIES_FILE}.orig" ]]; then
+    cp -p "${PROPERTIES_FILE}" "${PROPERTIES_FILE}.orig"
+fi
+
+# Replace default Termux branding and package identity
+python3 - <<PY
+import sys
+
+props_path = "${PROPERTIES_FILE}"
+with open(props_path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+replacements = [
+    ('TERMUX__NAME="Termux"', 'TERMUX__NAME="${DEVBOX_APP_NAME}"'),
+    ('TERMUX_APP__PACKAGE_NAME="com.termux"', 'TERMUX_APP__PACKAGE_NAME="${DEVBOX_APP_PACKAGE}"'),
+    ('TERMUX_APP__NAMESPACE="com.termux"', 'TERMUX_APP__NAMESPACE="${DEVBOX_APP_NAMESPACE}"'),
+    ('TERMUX_REPO_APP__PACKAGE_NAME="com.termux"', 'TERMUX_REPO_APP__PACKAGE_NAME="${DEVBOX_APP_PACKAGE}"'),
+    ('TERMUX_REPO_APP__DATA_DIR="/data/data/com.termux"', 'TERMUX_REPO_APP__DATA_DIR="/data/data/${DEVBOX_APP_PACKAGE}"'),
+    ('TERMUX_REPO__CORE_DIR="/data/data/com.termux/termux/core"', 'TERMUX_REPO__CORE_DIR="/data/data/${DEVBOX_APP_PACKAGE}/termux/core"'),
+    ('TERMUX_REPO__APPS_DIR="/data/data/com.termux/termux/app"', 'TERMUX_REPO__APPS_DIR="/data/data/${DEVBOX_APP_PACKAGE}/termux/app"'),
+    ('TERMUX_REPO__ROOTFS="/data/data/com.termux/files"', 'TERMUX_REPO__ROOTFS="/data/data/${DEVBOX_APP_PACKAGE}/files"'),
+    ('TERMUX_REPO__HOME="/data/data/com.termux/files/home"', 'TERMUX_REPO__HOME="/data/data/${DEVBOX_APP_PACKAGE}/files/home"'),
+    ('TERMUX_REPO__PREFIX="/data/data/com.termux/files/usr"', 'TERMUX_REPO__PREFIX="/data/data/${DEVBOX_APP_PACKAGE}/files/usr"'),
+    ('CGCT_DEFAULT_PREFIX="/data/data/com.termux/files/usr/glibc"', 'CGCT_DEFAULT_PREFIX="/data/data/${DEVBOX_APP_PACKAGE}/files/usr/glibc"'),
+    ('export CGCT_DIR="/data/data/com.termux/cgct"', 'export CGCT_DIR="/data/data/${DEVBOX_APP_PACKAGE}/cgct"'),
+]
+
+for old, new in replacements:
+    if old in content:
+        content = content.replace(old, new)
+        print(f"  [+] Replaced: {old} -> {new}")
+    else:
+        print(f"  [!] Warning: pattern not found: {old}")
+
+with open(props_path, "w", encoding="utf-8") as f:
+    f.write(content)
+
+print("[*] Successfully updated properties.sh")
+PY
+
+# Validate updated properties.sh by executing in subshell
+echo "[*] Validating updated properties.sh derivation rules..."
+(
+    cd "${TARGET_DIR}"
+    export TERMUX_SCRIPTDIR="${TARGET_DIR}"
+    # shellcheck source=/dev/null
+    source "${PROPERTIES_FILE}"
+
+    echo "    TERMUX__NAME:           ${TERMUX__NAME}"
+    echo "    TERMUX_APP__PACKAGE_NAME: ${TERMUX_APP__PACKAGE_NAME}"
+    echo "    TERMUX_APP__DATA_DIR:   ${TERMUX_APP__DATA_DIR}"
+    echo "    TERMUX__ROOTFS:         ${TERMUX__ROOTFS}"
+    echo "    TERMUX__PREFIX:         ${TERMUX__PREFIX}"
+    echo "    TERMUX_PREFIX:          ${TERMUX_PREFIX}"
+    echo "    TERMUX_ANDROID_HOME:    ${TERMUX_ANDROID_HOME}"
+
+    if [[ "${TERMUX_APP__PACKAGE_NAME}" != "${DEVBOX_APP_PACKAGE}" ]]; then
+        echo "[-] ERROR: Package name mismatch! Expected '${DEVBOX_APP_PACKAGE}', got '${TERMUX_APP__PACKAGE_NAME}'" >&2
+        exit 1
+    fi
+
+    if [[ "${TERMUX__PREFIX}" != "${DEVBOX_PREFIX}" ]]; then
+        echo "[-] ERROR: Prefix mismatch! Expected '${DEVBOX_PREFIX}', got '${TERMUX__PREFIX}'" >&2
+        exit 1
+    fi
+
+    if [[ "${TERMUX_PREFIX}" != "${DEVBOX_PREFIX}" ]]; then
+        echo "[-] ERROR: Deprecated TERMUX_PREFIX mismatch! Expected '${DEVBOX_PREFIX}', got '${TERMUX_PREFIX}'" >&2
+        exit 1
+    fi
+
+    if [[ "${TERMUX_APP__DATA_DIR}" != "${DEVBOX_DATA_DIR}" ]]; then
+        echo "[-] ERROR: Data dir mismatch! Expected '${DEVBOX_DATA_DIR}', got '${TERMUX_APP__DATA_DIR}'" >&2
+        exit 1
+    fi
+)
+
+echo "[+] DevBox identity applied and verified successfully."

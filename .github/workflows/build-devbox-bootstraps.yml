@@ -1,0 +1,159 @@
+name: Build DevBox Bootstrap Archives (ARM64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force rebuild of all packages and dependencies"
+        type: boolean
+        default: true
+      publish_release:
+        description: "Publish bootstrap zip to GitHub Release"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Release tag (e.g., v0.1.0-bootstrap)"
+        type: string
+        default: ""
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'bootstrap-builder/**'
+      - 'scripts/properties.sh'
+      - 'packages/**'
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVBOX_APP_PACKAGE: "com.devbox.terminal"
+  DEVBOX_APP_NAME: "DevBox"
+  DEVBOX_PREFIX: "/data/data/com.devbox.terminal/files/usr"
+  DEVBOX_ARCH: "aarch64"
+  UPSTREAM_COMMIT: "62195791c21099ecd1fe54a5df517d4659ec195d"
+  BUILDER_IMAGE: "ghcr.io/termux/package-builder:latest"
+
+jobs:
+  build-bootstrap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout devbox-packages repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Termux Packages source tree
+        id: setup_tree
+        run: |
+          if [ -f "./scripts/properties.sh" ]; then
+            echo "[*] Using current repository as termux-packages source tree."
+            echo "repo_dir=${PWD}" >> "$GITHUB_OUTPUT"
+          else
+            echo "[*] Sourcing pinned upstream termux-packages (${UPSTREAM_COMMIT})..."
+            git clone https://github.com/termux/termux-packages.git termux-packages-tree
+            cd termux-packages-tree
+            git checkout "${UPSTREAM_COMMIT}"
+            cd ..
+            echo "repo_dir=${PWD}/termux-packages-tree" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply DevBox application identity (com.devbox.terminal)
+        run: |
+          TARGET_DIR="${{ steps.setup_tree.outputs.repo_dir }}"
+          chmod +x ./bootstrap-builder/scripts/*.sh 2>/dev/null || true
+          if [ -f "./bootstrap-builder/scripts/apply-devbox-identity.sh" ]; then
+            ./bootstrap-builder/scripts/apply-devbox-identity.sh "${TARGET_DIR}"
+          else
+            ./scripts/apply-devbox-identity.sh "${TARGET_DIR}"
+          fi
+
+      - name: Pull Termux package builder container
+        run: |
+          docker pull "${BUILDER_IMAGE}"
+
+      - name: Build ARM64 bootstrap from source inside builder container
+        run: |
+          TARGET_DIR="${{ steps.setup_tree.outputs.repo_dir }}"
+          cd "${TARGET_DIR}"
+
+          # Ensure container runs with explicit non-download configuration
+          # By NOT setting -i or -I, build-package compiles all dependencies from source
+          # targeting /data/data/com.devbox.terminal/files/usr.
+          echo "[*] Launching container build for ARM64..."
+          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures aarch64 -f
+
+      - name: Verify bootstrap archive prefix and integrity
+        id: verify
+        run: |
+          TARGET_DIR="${{ steps.setup_tree.outputs.repo_dir }}"
+          BOOTSTRAP_ZIP="${TARGET_DIR}/bootstrap-aarch64.zip"
+
+          if [ ! -f "${BOOTSTRAP_ZIP}" ]; then
+            echo "[-] ERROR: bootstrap-aarch64.zip was not generated!" >&2
+            exit 1
+          fi
+
+          if [ -f "./bootstrap-builder/scripts/verify-bootstrap-prefix.sh" ]; then
+            ./bootstrap-builder/scripts/verify-bootstrap-prefix.sh "${BOOTSTRAP_ZIP}"
+          else
+            ./scripts/verify-bootstrap-prefix.sh "${BOOTSTRAP_ZIP}"
+          fi
+
+          # Copy artifacts to workspace root for upload
+          cp -v "${BOOTSTRAP_ZIP}" ./
+          cp -v "${BOOTSTRAP_ZIP}.sha256" ./
+          cp -v "${TARGET_DIR}/manifest.json" ./
+
+          SHA256_VAL=$(cat bootstrap-aarch64.zip.sha256 | cut -d' ' -f1)
+          echo "sha256=${SHA256_VAL}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Checksum Manifest
+        run: |
+          cat <<EOF > CHECKSUMS.txt
+          # DevBox Bootstrap Archive Checksums
+          # Target Package: ${DEVBOX_APP_PACKAGE}
+          # Architecture:   ${DEVBOX_ARCH} (ARM64)
+          # Pinned Commit:  ${UPSTREAM_COMMIT}
+
+          $(cat bootstrap-aarch64.zip.sha256)
+          EOF
+          cat CHECKSUMS.txt
+
+      - name: Upload Bootstrap Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: devbox-bootstrap-aarch64
+          path: |
+            bootstrap-aarch64.zip
+            bootstrap-aarch64.zip.sha256
+            manifest.json
+            CHECKSUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: ${{ github.event.inputs.publish_release == 'true' || startsWith(github.ref, 'refs/tags/') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag }}"
+          if [ -z "${TAG}" ]; then
+            TAG="bootstrap-$(date +'%Y.%m.%d-%H%M')"
+          fi
+          echo "[*] Creating release: ${TAG}"
+          gh release create "${TAG}" \
+            --title "DevBox Bootstrap ${TAG} (${DEVBOX_APP_PACKAGE})" \
+            --notes "Autonomous source build for DevBox (com.devbox.terminal) ARM64. Built entirely from source without official Termux binary debs." \
+            bootstrap-aarch64.zip \
+            bootstrap-aarch64.zip.sha256 \
+            manifest.json \
+            CHECKSUMS.txt
