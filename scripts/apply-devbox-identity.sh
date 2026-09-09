@@ -73,6 +73,7 @@ print("[*] Successfully updated properties.sh")
 PY
 
 # Safe-guard build-bootstraps.sh against empty/unset variable deletion in container
+# and replace subshell memory-leaking variable capture with a temporary log file
 BOOTSTRAPS_SCRIPT="${TARGET_DIR}/scripts/build-bootstraps.sh"
 if [[ -f "${BOOTSTRAPS_SCRIPT}" ]]; then
     python3 - "${BOOTSTRAPS_SCRIPT}" <<'PY'
@@ -91,10 +92,41 @@ text = text.replace(
     'if [[ -n "${TERMUX_BUILT_DEBS_DIRECTORY:-}" && -d "${TERMUX_BUILT_DEBS_DIRECTORY}" ]]; then rm -f "${TERMUX_BUILT_DEBS_DIRECTORY}"/*; fi'
 )
 
+# Replace memory-exhausting subshell build_output=$(...) with log-file tee
+old_build_block = """\texec 99>&1
+\tbuild_output="$("$TERMUX_PACKAGES_DIRECTORY"/build-package.sh "${BUILD_PACKAGE_OPTIONS[@]}" -a "$TERMUX_ARCH" "$package_name" 2>&1 | tee >(cat - >&99); exit ${PIPESTATUS[0]})";
+\treturn_value=$?
+\techo "[*] Building \'$package_name\' exited with exit code $return_value"
+\texec 99>&-
+\tif [ $return_value -ne 0 ]; then
+\t\techo "Failed to build package \'$package_name\' for arch \'$TERMUX_ARCH\'" 1>&2
+
+\t\t# Dependency packages may not have a build.sh, so we ignore the error.
+\t\t# A better way should be implemented to validate if its actually a dependency
+\t\t# and not a required package itself, by removing dependencies from PACKAGES array.
+\t\tif [[ $IGNORE_BUILD_SCRIPT_NOT_FOUND_ERROR == "1" ]] && [[ "$build_output" == *"No build.sh script at package dir"* ]]; then"""
+
+new_build_block = """\tlocal _build_log="/tmp/termux_pkg_build.log"
+\tset +e
+\t"$TERMUX_PACKAGES_DIRECTORY"/build-package.sh "${BUILD_PACKAGE_OPTIONS[@]}" -a "$TERMUX_ARCH" "$package_name" 2>&1 | tee "$_build_log"
+\treturn_value=${PIPESTATUS[0]}
+\tset -e
+\techo "[*] Building \'$package_name\' exited with exit code $return_value"
+\tif [ $return_value -ne 0 ]; then
+\t\techo "Failed to build package \'$package_name\' for arch \'$TERMUX_ARCH\'" 1>&2
+
+\t\tif [[ $IGNORE_BUILD_SCRIPT_NOT_FOUND_ERROR == "1" ]] && grep -q "No build.sh script at package dir" "$_build_log" 2>/dev/null; then"""
+
+if old_build_block in text:
+    text = text.replace(old_build_block, new_build_block)
+    print("[*] Successfully patched build_package subshell memory leak")
+else:
+    print("[!] Warning: old_build_block not found in build-bootstraps.sh")
+
 with open(path, "w", encoding="utf-8") as f:
     f.write(text)
 
-print("[*] Successfully safeguarded scripts/build-bootstraps.sh cleanup logic")
+print("[*] Successfully safeguarded scripts/build-bootstraps.sh")
 PY
 fi
 

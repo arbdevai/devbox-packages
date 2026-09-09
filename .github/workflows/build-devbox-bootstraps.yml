@@ -42,6 +42,13 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: Free disk space on runner
+        run: |
+          echo "[*] Freeing runner disk space..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /usr/local/share/powershell 2>/dev/null || true
+          sudo docker image prune -af 2>/dev/null || true
+          df -h
+
       - name: Checkout devbox-packages repository
         uses: actions/checkout@v4
         with:
@@ -61,6 +68,16 @@ jobs:
             cd ..
             echo "repo_dir=${PWD}/termux-packages-tree" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Cache built package archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.setup_tree.outputs.repo_dir }}/output
+          key: devbox-debs-${{ env.DEVBOX_ARCH }}-${{ env.UPSTREAM_COMMIT }}-${{ hashFiles('bootstrap-builder/**', 'packages/**') }}
+          restore-keys: |
+            devbox-debs-${{ env.DEVBOX_ARCH }}-${{ env.UPSTREAM_COMMIT }}-
+            devbox-debs-${{ env.DEVBOX_ARCH }}-
 
       - name: Apply DevBox application identity (com.devbox.terminal)
         run: |
