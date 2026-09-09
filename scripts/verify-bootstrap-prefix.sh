@@ -1,150 +1,103 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# verify-bootstrap-prefix.sh
-# Validates DevBox (com.devbox.terminal) bootstrap archive integrity,
-# verifies prefix path separation from com.termux, and generates checksums.
-# ==============================================================================
-
+# Static archive validation only; this does not prove Android shell execution.
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/../config.env"
-
-if [[ -f "${CONFIG_FILE}" ]]; then
-    # shellcheck source=/dev/null
-    source "${CONFIG_FILE}"
-else
-    DEVBOX_APP_PACKAGE="com.devbox.terminal"
-    DEVBOX_PREFIX="/data/data/com.devbox.terminal/files/usr"
-    DEVBOX_ARCH="aarch64"
-fi
-
-ZIP_FILE="${1:-}"
-
-if [[ -z "${ZIP_FILE}" || ! -f "${ZIP_FILE}" ]]; then
-    echo "[-] ERROR: Bootstrap archive file not specified or not found: '${ZIP_FILE}'" >&2
-    echo "Usage: $0 <path-to-bootstrap-arch.zip>" >&2
-    exit 1
-fi
-
-ZIP_FILE="$(realpath "${ZIP_FILE}")"
-ZIP_DIR="$(dirname "${ZIP_FILE}")"
-ZIP_NAME="$(basename "${ZIP_FILE}")"
-
-echo "[*] Inspecting bootstrap archive: ${ZIP_NAME}"
-
-TMP_VERIFY_DIR="$(mktemp -d "/tmp/devbox-verify-XXXXXX")"
-trap 'rm -rf "${TMP_VERIFY_DIR}"' EXIT
-
-unzip -q "${ZIP_FILE}" -d "${TMP_VERIFY_DIR}"
-
-# 1. Verify SYMLINKS.txt
-echo "[*] Checking SYMLINKS.txt..."
-if [[ ! -f "${TMP_VERIFY_DIR}/SYMLINKS.txt" ]]; then
-    echo "[-] ERROR: SYMLINKS.txt missing from bootstrap archive!" >&2
-    exit 1
-fi
-
-SYMLINK_COUNT="$(wc -l < "${TMP_VERIFY_DIR}/SYMLINKS.txt")"
-echo "    Found ${SYMLINK_COUNT} symlink mappings."
-if [[ "${SYMLINK_COUNT}" -eq 0 ]]; then
-    echo "[-] ERROR: SYMLINKS.txt is empty!" >&2
-    exit 1
-fi
-
-# 2. Verify critical executables
-echo "[*] Checking essential binaries..."
-CRITICAL_FILES=(
-    "bin/bash"
-    "bin/dash"
-    "bin/dpkg"
-    "bin/apt"
-    "etc/apt/sources.list"
-    "var/lib/dpkg/status"
-)
-
-MISSING_COUNT=0
-for cf in "${CRITICAL_FILES[@]}"; do
-    if [[ ! -f "${TMP_VERIFY_DIR}/${cf}" ]]; then
-        echo "    [!] Warning: ${cf} not found as regular file (may be symlink)."
-    else
-        echo "    [+] Found ${cf}"
-    fi
-done
-
-# 3. Check for forbidden com.termux strings in text files and ELF binaries
-echo "[*] Checking for forbidden 'com.termux' contamination..."
-CONTAMINATION_FOUND=0
-
-# Check dpkg status and conffiles
-if [[ -f "${TMP_VERIFY_DIR}/var/lib/dpkg/status" ]]; then
-    if grep -q "com.termux" "${TMP_VERIFY_DIR}/var/lib/dpkg/status" 2>/dev/null; then
-        echo "[-] ERROR: Found 'com.termux' references in var/lib/dpkg/status!" >&2
-        grep -n "com.termux" "${TMP_VERIFY_DIR}/var/lib/dpkg/status" | head -n 10 >&2
-        CONTAMINATION_FOUND=1
-    fi
-fi
-
-# Check binaries if strings utility is available
-if command -v strings >/dev/null 2>&1; then
-    for bin_file in "${TMP_VERIFY_DIR}/bin/bash" "${TMP_VERIFY_DIR}/bin/dpkg" "${TMP_VERIFY_DIR}/bin/apt"; do
-        if [[ -f "${bin_file}" ]]; then
-            if strings "${bin_file}" | grep -q "/data/data/com.termux"; then
-                echo "[-] ERROR: Hardcoded '/data/data/com.termux' found in binary $(basename "${bin_file}")!" >&2
-                CONTAMINATION_FOUND=1
-            fi
-            if strings "${bin_file}" | grep -q "${DEVBOX_PREFIX}"; then
-                echo "    [+] Confirmed ${DEVBOX_PREFIX} in $(basename "${bin_file}")"
-            fi
-        fi
-    done
-fi
-
-if [[ "${CONTAMINATION_FOUND}" -ne 0 ]]; then
-    echo "[-] ERROR: Bootstrap archive contains contaminated 'com.termux' paths!" >&2
-    exit 1
-fi
-
-# 4. Extract package summary from dpkg/status
-PACKAGES_INSTALLED=()
-if [[ -f "${TMP_VERIFY_DIR}/var/lib/dpkg/status" ]]; then
-    while IFS= read -r pkg; do
-        PACKAGES_INSTALLED+=("${pkg}")
-    done < <(grep "^Package: " "${TMP_VERIFY_DIR}/var/lib/dpkg/status" | cut -d' ' -f2 | sort -u)
-fi
-
-TOTAL_FILES="$(find "${TMP_VERIFY_DIR}" -type f | wc -l)"
-ZIP_SIZE="$(stat -c %s "${ZIP_FILE}" 2>/dev/null || stat -f %z "${ZIP_FILE}")"
-SHA256_HASH="$(sha256sum "${ZIP_FILE}" | cut -d' ' -f1)"
-
-# 5. Write SHA256 file
-echo "${SHA256_HASH}  ${ZIP_NAME}" > "${ZIP_FILE}.sha256"
-echo "[+] Wrote checksum to: ${ZIP_FILE}.sha256 (${SHA256_HASH})"
-
-# 6. Write JSON manifest
-MANIFEST_FILE="${ZIP_DIR}/manifest.json"
-python3 - <<PY
+python3 - "${1:?Usage: verify-bootstrap-prefix.sh archive.zip}" <<'PY'
+import hashlib
 import json
-from datetime import datetime, timezone
+import posixpath
+import re
+import stat
+import struct
+import sys
+import zipfile
+from pathlib import Path
 
-manifest = {
-    "application_name": "${DEVBOX_APP_NAME:-DevBox}",
-    "package_name": "${DEVBOX_APP_PACKAGE}",
-    "prefix": "${DEVBOX_PREFIX}",
-    "architecture": "${DEVBOX_ARCH}",
-    "archive_file": "${ZIP_NAME}",
-    "sha256": "${SHA256_HASH}",
-    "size_bytes": ${ZIP_SIZE},
-    "file_count": ${TOTAL_FILES},
-    "symlink_count": ${SYMLINK_COUNT},
-    "built_at": datetime.now(timezone.utc).isoformat(),
-    "installed_packages": """${PACKAGES_INSTALLED[*]:-}""".split()
-}
+PREFIX = '/data/data/com.devbox.terminal/files/usr'
+PACKAGE = 'com.devbox.terminal'
+path = Path(sys.argv[1]).resolve()
 
-with open("${MANIFEST_FILE}", "w", encoding="utf-8") as f:
-    json.dump(manifest, f, indent=2)
 
-print("[+] Wrote manifest to: ${MANIFEST_FILE}")
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def safe_name(value):
+    require(value and not value.startswith('/') and '\\' not in value and '\x00' not in value,
+            f'Unsafe archive path: {value!r}')
+    require('..' not in value.split('/'), f'Traversal path: {value!r}')
+    value = posixpath.normpath(value)
+    require(value != '.', 'Empty archive member')
+    return value
+
+
+try:
+    require(path.is_file(), 'Archive does not exist')
+    names, directories, links = set(), set(), {}
+    saw_prefix = False
+    elf_count = 0
+    package_names = []
+    with zipfile.ZipFile(path) as bundle:
+        require(sum(info.file_size for info in bundle.infolist()) <= 2 * 1024**3,
+                'Archive exceeds decompressed size limit')
+        for info in bundle.infolist():
+            name = safe_name(info.filename)
+            require(name not in names, f'Duplicate member: {name}')
+            names.add(name)
+            require(not stat.S_ISLNK(info.external_attr >> 16), 'Symlinks must use SYMLINKS.txt')
+            if info.is_dir():
+                directories.add(name)
+                continue
+            require(info.file_size <= 256 * 1024**2, f'Member too large: {name}')
+            data = bundle.read(info)  # Verifies ZIP CRC without extracting files.
+            for match in re.finditer(rb'/data/(?:data/|user(?:_de)?/[0-9]+/)([A-Za-z0-9_.-]+)', data):
+                require(match[1] == PACKAGE.encode(), f'Foreign application data path in {name}: {match[0]!r}')
+            saw_prefix |= PREFIX.encode() in data
+            if data.startswith(b'\x7fELF'):
+                require(len(data) >= 64 and data[4:7] == b'\x02\x01\x01', f'Invalid ELF64 header: {name}')
+                require(struct.unpack_from('<H', data, 18)[0] == 183, f'Non-ARM64 ELF: {name}')
+                elf_count += 1
+            if name == 'SYMLINKS.txt':
+                for line in data.decode('utf-8').splitlines():
+                    parts = line.split('←')
+                    require(len(parts) == 2 and all(parts), 'Malformed symlink record')
+                    target, link = parts
+                    link = safe_name(link)
+                    require(link not in links, f'Duplicate symlink: {link}')
+                    if target.startswith('/'):
+                        require(target.startswith(PREFIX + '/'), f'Foreign symlink target: {target}')
+                        target = target[len(PREFIX) + 1:]
+                    else:
+                        target = posixpath.normpath(posixpath.join(posixpath.dirname(link), target))
+                    links[link] = safe_name(target)
+            if name == 'var/lib/dpkg/status':
+                package_names = sorted(set(re.findall(r'^Package: (\S+)$', data.decode('utf-8'), re.M)))
+    require(links and 'SYMLINKS.txt' in names, 'Missing or empty symlink table')
+    require(saw_prefix and elf_count > 0, 'No DevBox prefix or ARM64 ELF found')
+    require(not names.intersection(links), 'Symlink collides with archive entry')
+    for name in names | set(links):
+        parent = posixpath.dirname(name)
+        while parent:
+            require(parent not in links, f'Symlink used as extraction parent: {parent}')
+            parent = posixpath.dirname(parent)
+    for required in ('bin/bash', 'bin/dash', 'bin/sh', 'bin/dpkg', 'bin/apt', 'var/lib/dpkg/status'):
+        resolved, visited = required, set()
+        while resolved in links:
+            require(resolved not in visited, f'Symlink cycle: {required}')
+            visited.add(resolved)
+            resolved = links[resolved]
+        require(resolved in names and resolved not in directories, f'Missing essential file: {required}')
+    require(package_names, 'Empty package database')
+    digest = hashlib.file_digest(path.open('rb'), 'sha256').hexdigest()
+    manifest = dict(application_name='DevBox', package_name=PACKAGE, prefix=PREFIX,
+                    architecture='aarch64', archive_file=path.name, sha256=digest,
+                    size_bytes=path.stat().st_size, file_count=len(names - directories),
+                    symlink_count=len(links), elf_count=elf_count, installed_packages=package_names,
+                    validation='static archive inspection; Android runtime testing still required')
+    path.with_name(path.name + '.sha256').write_text(f'{digest}  {path.name}\n')
+    path.with_name('manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    print(f'Static bootstrap validation passed: {elf_count} ARM64 ELF files, {len(links)} symlinks')
+except (ValueError, OSError, UnicodeError, zipfile.BadZipFile, struct.error) as error:
+    print(f'Bootstrap validation FAILED: {error}', file=sys.stderr)
+    sys.exit(1)
 PY
-
-echo "[+] Bootstrap archive verification PASSED."
