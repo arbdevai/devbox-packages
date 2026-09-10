@@ -123,6 +123,13 @@ if old_build_block in text:
 else:
     print("[!] Warning: old_build_block not found in build-bootstraps.sh")
 
+# Fix typo in upstream build-bootstraps.sh: bzip2 package is named libbz2 in termux-packages
+text = text.replace(
+    'PACKAGES+=("bzip2")',
+    'PACKAGES+=("libbz2")'
+)
+print("[*] Replaced PACKAGES+=(\"bzip2\") with PACKAGES+=(\"libbz2\")")
+
 with open(path, "w", encoding="utf-8") as f:
     f.write(text)
 
