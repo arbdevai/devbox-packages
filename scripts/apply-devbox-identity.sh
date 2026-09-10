@@ -130,6 +130,25 @@ text = text.replace(
 )
 print("[*] Replaced PACKAGES+=(\"bzip2\") with PACKAGES+=(\"libbz2\")")
 
+# The restricted builder permits writes only under output/, not the checkout root.
+# Explicitly propagate failures: callers using `function || return` disable errexit
+# inside the function, even when the script has set -e.
+old_archive = '''\t\tzip -r9 "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" ./*
+\t)
+
+\tmv -f "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" "$TERMUX_PACKAGES_DIRECTORY/"'''
+new_archive = '''\t\tzip -r9 "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" ./* || return $?
+\t) || return $?
+
+\tlocal destination="$TERMUX_PACKAGES_DIRECTORY/output/bootstrap-${1}.zip"
+\tmkdir -p "$TERMUX_PACKAGES_DIRECTORY/output" || return $?
+\tmv -- "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" "$destination" || return $?
+\ttest -s "$destination" || return 1'''
+if text.count(old_archive) == 1:
+    text = text.replace(old_archive, new_archive)
+elif new_archive not in text:
+    raise SystemExit("Bootstrap archive output patch did not match pinned source; refusing build")
+
 with open(path, "w", encoding="utf-8") as f:
     f.write(text)
 
