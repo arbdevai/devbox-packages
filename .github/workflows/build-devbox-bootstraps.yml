@@ -93,17 +93,26 @@ jobs:
         run: |
           docker pull "${BUILDER_IMAGE}"
 
+      - name: Prepare image with required SDK components
+        run: |
+          set -euo pipefail
+          context=.
+          if [ -f bootstrap-builder/Dockerfile ]; then context=bootstrap-builder; fi
+          docker build --build-arg BASE_IMAGE="$BUILDER_IMAGE" -t devbox-sdk-builder:ci "$context"
+          echo 'TERMUX_BUILDER_IMAGE_NAME=devbox-sdk-builder:ci' >> "$GITHUB_ENV"
+
+      - name: Preflight termux-am with lint enabled
+        run: |
+          set -euo pipefail
+          cd "${{ steps.setup_tree.outputs.repo_dir }}"
+          ./scripts/run-docker.sh ./build-package.sh -a aarch64 termux-am
+
       - name: Build ARM64 bootstrap from source inside builder container
         run: |
           TARGET_DIR="${{ steps.setup_tree.outputs.repo_dir }}"
           cd "${TARGET_DIR}"
 
-          # Ensure container runs with explicit non-download configuration.
-          # Do not pass -f on a fresh source tree: pinned build-bootstraps.sh
-          # initializes its package marker paths only during normal setup, while
-          # -f clears an empty/unset path as /* in the builder container.
-          # Omitting -i/-I still forces recursive source builds rather than
-          # downloading official com.termux Debian packages.
+          # Launch bootstrap build for ARM64 without downloading official com.termux Debian packages
           echo "[*] Launching container build for ARM64..."
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures aarch64
 
