@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Static archive validation only; this does not prove Android shell execution.
 set -euo pipefail
-python3 - "${1:?Usage: verify-bootstrap-prefix.sh archive.zip}" <<'PY'
+python3 - "${1:?Usage: verify-bootstrap-prefix.sh archive.zip}" "$(dirname "$(realpath "$0")")" <<'PY'
 import hashlib
 import json
 import posixpath
@@ -11,6 +11,9 @@ import struct
 import sys
 import zipfile
 from pathlib import Path
+
+sys.path.insert(0, sys.argv[2])
+from path_policy import process as process_path_policy, PolicyError
 
 PREFIX = '/data/data/com.devbox.terminal/files/usr'
 PACKAGE = 'com.devbox.terminal'
@@ -50,8 +53,13 @@ try:
                 continue
             require(info.file_size <= 256 * 1024**2, f'Member too large: {name}')
             data = bundle.read(info)  # Verifies ZIP CRC without extracting files.
-            for match in re.finditer(rb'/data/(?:data/|user(?:_de)?/[0-9]+/)([A-Za-z0-9_.-]+)', data):
-                require(match[1] == PACKAGE.encode(), f'Foreign application data path in {name}: {match[0]!r}')
+            entry_hash = hashlib.sha256(data).hexdigest()
+            try:
+                findings = process_path_policy(data, name, entry_hash)
+                for line in findings:
+                    print(f"  {line}")
+            except PolicyError as e:
+                require(False, str(e))
             saw_prefix |= PREFIX.encode() in data
             if data.startswith(b'\x7fELF'):
                 require(len(data) >= 64 and data[4:7] == b'\x02\x01\x01', f'Invalid ELF64 header: {name}')
