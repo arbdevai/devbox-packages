@@ -46,7 +46,7 @@ with open(props_path, "r", encoding="utf-8") as f:
 
 replacements = [
     ('TERMUX__NAME="Termux"', 'TERMUX__NAME="${DEVBOX_APP_NAME}"'),
-    ('TERMUX_APP__PACKAGE_NAME="com.termux"', 'TERMUX_APP__PACKAGE_NAME="${DEVBOX_APP_PACKAGE}"'),
+    ('TERMUX_APP__PACKAGE_NAME="com.termux"', 'TERMUX_APP__PACKAGE_NAME="${DEVBOX_APP_PACKAGE}"; export TERMUX_APP_PACKAGE="${DEVBOX_APP_PACKAGE}"'),
     ('TERMUX_APP__NAMESPACE="com.termux"', 'TERMUX_APP__NAMESPACE="${DEVBOX_APP_NAMESPACE}"'),
     ('TERMUX_REPO_APP__PACKAGE_NAME="com.termux"', 'TERMUX_REPO_APP__PACKAGE_NAME="${DEVBOX_APP_PACKAGE}"'),
     ('TERMUX_REPO_APP__DATA_DIR="/data/data/com.termux"', 'TERMUX_REPO_APP__DATA_DIR="/data/data/${DEVBOX_APP_PACKAGE}"'),
@@ -153,6 +153,29 @@ with open(path, "w", encoding="utf-8") as f:
     f.write(text)
 
 print("[*] Successfully safeguarded scripts/build-bootstraps.sh")
+PY
+fi
+
+# Patch packages/termux-tools/build.sh to pass TERMUX_APP_PACKAGE to configure
+TERMUX_TOOLS_BUILD="${TARGET_DIR}/packages/termux-tools/build.sh"
+if [[ -f "${TERMUX_TOOLS_BUILD}" ]]; then
+    python3 - "${TERMUX_TOOLS_BUILD}" "${DEVBOX_APP_PACKAGE}" <<'PY'
+import sys
+path, pkg = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as f:
+    text = f.read()
+
+patch_target = 'termux_step_pre_configure() {'
+patch_replacement = f'''termux_step_pre_configure() {{
+\tTERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" TERMUX_APP_PACKAGE={pkg}"'''
+
+if patch_target in text and 'TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" TERMUX_APP_PACKAGE=' not in text:
+    text = text.replace(patch_target, patch_replacement, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print("[*] Successfully patched termux-tools/build.sh with DEVBOX_APP_PACKAGE")
+else:
+    print("[!] termux-tools/build.sh already patched or target not found")
 PY
 fi
 
