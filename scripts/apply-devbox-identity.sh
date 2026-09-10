@@ -167,6 +167,7 @@ with open(path, "r", encoding="utf-8") as f:
 
 patch_target = 'termux_step_pre_configure() {'
 patch_replacement = f'''termux_step_pre_configure() {{
+\texport TERMUX_APP_PACKAGE="{pkg}"
 \tTERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" TERMUX_APP_PACKAGE={pkg}"'''
 
 if patch_target in text and 'TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" TERMUX_APP_PACKAGE=' not in text:
